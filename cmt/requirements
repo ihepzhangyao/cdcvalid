@@ -1,0 +1,33 @@
+package MdcValidSingle
+
+author Zhang Yao <zhangyao@ihep.ac.cn>
+
+use BesPolicy BesPolicy-01-*
+use GaudiInterface GaudiInterface-01-* External
+
+use BesAIDA      	*              	External
+use BesROOT      	BesROOT-*      	External
+use BesCLHEP     	BesCLHEP-*     	External
+
+#use MdcGeomSvc      	MdcGeomSvc-*     Mdc
+use MdcCalibFunSvc  	MdcCalibFunSvc-* Mdc
+use MagneticField   	MagneticField-*
+use Identifier      	Identifier-*     DetectorDescription
+
+use VertexFit    	VertexFit-*   	Analysis
+use EvtRecEvent  	EvtRecEvent-*  	Event
+use MdcNavigation 	MdcNavigation-* Mdc
+use MdcRawEvent  	MdcRawEvent-*  	Mdc
+use MdcRecEvent  	MdcRecEvent-*  	Mdc
+use EsTimeAlg    	EsTimeAlg-*   	Reconstruction
+use EventModel   	EventModel-*   	Event
+use RawEvent     	RawEvent-*     	Event
+use MdcPrintSvc         MdcPrintSvc-*   Mdc/MdcCheckUtil
+
+include_dirs "$(MDCVALIDSINGLEROOT)"
+
+apply_pattern component_library 
+library MdcValidSingle *.cxx components/*.cxx
+
+
+

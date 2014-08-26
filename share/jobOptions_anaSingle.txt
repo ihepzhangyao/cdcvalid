@@ -1,0 +1,30 @@
+#include "$ROOTIOROOT/share/jobOptions_ReadRec.txt"
+#include "$OFFLINEEVENTLOOPMGRROOT/share/OfflineEventLoopMgr_Option.txt"
+#include "$CALIBSVCROOT/share/job-CalibData.txt"
+#include "$VERTEXFITROOT/share/jobOptions_VertexDbSvc.txt"
+#include "$MAGNETICFIELDROOT/share/MagneticField.txt"
+#include "$ABSCORROOT/share/jobOptions_AbsCor.txt"
+#include "$MDCVALIDALGROOT/share/jobOptions_MdcValidAlg.txt"
+#include "$CALIBSVCROOT/share/calibConfig_rec_data.txt"
+
+// particle: 0,1,2,3,4 -> e, mu, pi, k, p
+MdcValidAlg.ParticleType = 0;
+MdcValidAlg.Ecms = 3.773;
+MdcValidAlg.CrossAngle = 0.011;
+MdcValidAlg.Yboost = 0.0;
+MdcValidAlg.Zboost = 0.0;
+MdcValidAlg.HistFile = "hist.root";
+
+// Input REC or DST file name 
+EventCnvSvc.digiRootInputFile = {
+"barrel.rec"
+};
+
+// Set output level threshold (2=DEBUG, 3=INFO, 4=WARNING, 5=ERROR, 6=FATAL )
+MessageSvc.OutputLevel = 6;
+
+// Number of events to be processed (default is 10)
+ApplicationMgr.EvtMax = -1;
+
+ApplicationMgr.HistogramPersistency = "ROOT";
+NTupleSvc.Output = { "FILE135 DATAFILE='ntuple.root' OPT='NEW' TYP='ROOT'"};

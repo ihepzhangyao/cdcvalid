@@ -1,0 +1,940 @@
+#include "MdcValidSingle/MdcValidSingle.h"
+#include "GaudiKernel/MsgStream.h"
+#include "GaudiKernel/AlgFactory.h"
+#include "GaudiKernel/ISvcLocator.h"
+#include "GaudiKernel/SmartDataPtr.h"
+#include "GaudiKernel/IDataProviderSvc.h"
+#include "GaudiKernel/PropertyMgr.h"
+#include "EventModel/EventHeader.h"
+#include "CLHEP/Units/PhysicalConstants.h"
+
+#include "HepPDT/ParticleDataTable.hh"
+#include "HepPDT/ParticleData.hh"
+#include "GaudiKernel/IPartPropSvc.h"
+
+#include "EventModel/Event.h"
+#include "EvTimeEvent/RecEsTime.h"
+#include "MdcRecEvent/RecMdcKalTrack.h"
+#include "MdcRecEvent/RecMdcHit.h"
+#include "MdcRecEvent/RecMdcDedx.h"  
+#include "MdcRecEvent/RecMdcDedxHit.h"
+#include "MdcRawEvent/MdcDigi.h"
+#include "Identifier/Identifier.h"
+#include "Identifier/MdcID.h"
+#include "CLHEP/Vector/ThreeVector.h"
+
+#include "VertexFit/KalmanKinematicFit.h"
+#include "VertexFit/VertexFit.h"
+//#include "VertexFit/Helix.h"
+#include "TrackUtil/Helix.h"
+#include "DstEvent/DstMdcKalTrack.h"
+#include "MdcGeom/Constants.h"
+#include "McTruth/MdcMcHit.h" 
+
+#include <vector>
+#include <iostream>
+#include <fstream>
+#include <iomanip>
+#include <cstring>
+
+using namespace std;
+using namespace Event;
+
+
+MdcValidSingle::MdcValidSingle(const std::string& name, ISvcLocator* pSvcLocator) :
+  Algorithm(name, pSvcLocator)
+{
+  declareProperty("checkRecTrack",	m_checkRecTrack = false);
+  declareProperty("checkKalTrack",	m_checkKalTrack = false);
+  declareProperty("debug",		m_debug = 0);
+  declareProperty("pid",		m_pid = 0);
+  declareProperty("cutCharge",		m_cutCharge = true);
+  declareProperty("cutPhi0",		m_cutPhi0 = -999.);
+  declareProperty("cutCosTa",		m_cutCosTa= -999.);
+  declareProperty("cutPt",		m_cutPt = -999.);
+  declareProperty("cutDr",		m_cutDr = -999.);
+  declareProperty("cutDz",		m_cutDz = -999.);
+  declareProperty("cutHitRate",		m_cutHitRate = 0.8);
+}
+
+// * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * 
+StatusCode MdcValidSingle::initialize(){
+
+  MsgStream log(msgSvc(), name());
+  StatusCode sc;
+  log << MSG::INFO << "in initialize()" << endreq;
+  m_totevt = 0;
+  m_nNotMatch = 0;
+  m_nMatchSingle = 0;
+  m_nMatchMulti = 0;
+
+  //sc = service("MdcGeomSvc", m_mdcGeomSvc);
+  //if(!sc.isSuccess()){
+  //  log << MSG::ERROR << " Could not initialize MdcGeomSvc" << endreq;
+  //  return StatusCode::FAILURE;
+  //}
+
+  //Initailize vertex 
+  sc = service("VertexDbSvc", m_vtxsvc);
+  if(!sc.isSuccess()){
+    log << MSG::ERROR << " Could not initialize VertexDbSvc" << endreq;
+    return StatusCode::FAILURE;
+  }
+
+  //Initailize magnetic filed 
+  sc = service ("MagneticFieldSvc",m_pIMF);
+  if(sc!=StatusCode::SUCCESS) {
+    log << MSG::ERROR << "Unable to open Magnetic field service"<<endreq;
+  }
+  m_bfield = new BField(m_pIMF);
+  log << MSG::INFO << "field z = "<<m_bfield->bFieldNominal()<< endreq;
+
+  //book ntuple
+  NTuplePtr nt1(ntupleSvc(), "MdcValidSingle/diffMc");
+  if ( nt1 ){
+    m_ntupleDiffMc = nt1;
+  } else {
+    m_ntupleDiffMc = ntupleSvc()->book("MdcValidSingle/diffMc", CLID_ColumnWiseTuple, "diffMc");
+    if(m_ntupleDiffMc){
+      m_ntupleDiffMc->addItem("run",         m_runDiff);
+      m_ntupleDiffMc->addItem("evt",         m_evtDiff);
+      m_ntupleDiffMc->addItem("tkId",        m_tkId);
+      m_ntupleDiffMc->addItem("nTk",         m_nTk);
+      m_ntupleDiffMc->addItem("dPhi0",       m_dPhi0);
+      m_ntupleDiffMc->addItem("dCosTa",      m_dCosTa);
+      m_ntupleDiffMc->addItem("dP",          m_dP);
+      m_ntupleDiffMc->addItem("dPt",         m_dPt);
+      m_ntupleDiffMc->addItem("dPz",         m_dPz);
+      m_ntupleDiffMc->addItem("dDr",         m_dDr);
+      m_ntupleDiffMc->addItem("dDz",         m_dDz);
+      m_ntupleDiffMc->addItem("dPhi0Kal",    m_dPhi0Kal);
+      m_ntupleDiffMc->addItem("dCosTaKal",   m_dCosTaKal);
+      m_ntupleDiffMc->addItem("dPKal",       m_dPKal);
+      m_ntupleDiffMc->addItem("dPtKal",      m_dPtKal);
+      m_ntupleDiffMc->addItem("dPzKal",      m_dPzKal);
+      m_ntupleDiffMc->addItem("dDrKal",      m_dDrKal);
+      m_ntupleDiffMc->addItem("dDzKal",      m_dDzKal);
+    } else {   
+      log << MSG::ERROR << "Cannot book tuple MdcValidSingle/diffMc" << endmsg;
+      return StatusCode::FAILURE;
+    }
+  }
+
+  NTuplePtr nt(ntupleSvc(), "MdcValidSingle/evt");
+  if ( nt ){
+    m_ntupleEvt = nt;
+  } else {
+    m_ntupleEvt = ntupleSvc()->book("MdcValidSingle/evt", CLID_ColumnWiseTuple, "evt");
+    if(m_ntupleEvt){
+      m_ntupleEvt->addItem("run",        m_run);
+      m_ntupleEvt->addItem("evt",        m_evt);
+      m_ntupleEvt->addItem("t0",         m_t0);
+      m_ntupleEvt->addItem("t0Stat",     m_t0Stat);
+      m_ntupleEvt->addItem("t0Truth",    m_t0Truth);
+      m_ntupleEvt->addItem("nTk",        m_nTrk);
+      m_ntupleEvt->addItem("nLayerMc",   m_nLayerMc);
+      m_ntupleEvt->addItem("nDigi",      m_nDigi);
+      m_ntupleEvt->addItem("chi2",       m_chi2);
+      m_ntupleEvt->addItem("ndof",       m_ndof);
+      m_ntupleEvt->addItem("nMatchMdc",  m_nMatchMdc);
+      m_ntupleEvt->addItem("nMatchKal",  m_nMatchKal);
+
+      m_ntupleEvt->addItem("firstHitZ",  m_firstHitZ);
+      m_ntupleEvt->addItem("lastHitZ",   m_lastHitZ);
+      m_ntupleEvt->addItem("pidTruth",   m_pidTruth);
+      m_ntupleEvt->addItem("costaTruth", m_costaTruth);
+      m_ntupleEvt->addItem("tanlTruth",  m_tanlTruth);
+      m_ntupleEvt->addItem("phiTruth",   m_phi0Truth);
+      m_ntupleEvt->addItem("drTruth",    m_drTruth);
+      m_ntupleEvt->addItem("dzTruth",    m_dzTruth);
+      m_ntupleEvt->addItem("ptTruth",    m_ptTruth);
+      m_ntupleEvt->addItem("pTruth",     m_pTruth);
+      m_ntupleEvt->addItem("pzTruth",    m_pzTruth);
+      m_ntupleEvt->addItem("qTruth",     m_qTruth);
+
+      m_ntupleEvt->addItem("charge",     m_charge);
+      m_ntupleEvt->addItem("trkId",      m_trkId);
+      m_ntupleEvt->addItem("dr",         m_dr);
+      m_ntupleEvt->addItem("phi0",       m_phi0);
+      m_ntupleEvt->addItem("kap",        m_kap);
+      m_ntupleEvt->addItem("dz",         m_dz);
+      m_ntupleEvt->addItem("tanl",       m_tanl);
+      m_ntupleEvt->addItem("p",          m_p);
+      m_ntupleEvt->addItem("pt",         m_pt);
+      m_ntupleEvt->addItem("px",         m_px);
+      m_ntupleEvt->addItem("py",         m_py);
+      m_ntupleEvt->addItem("pz",         m_pz);
+      m_ntupleEvt->addItem("cosTheta",   m_cosTheta);
+      m_ntupleEvt->addItem("phi",        m_phi);
+      m_ntupleEvt->addItem("r",          m_r);
+      m_ntupleEvt->addItem("vr",         m_vr);
+      m_ntupleEvt->addItem("vz",         m_vz);
+      m_ntupleEvt->addItem("stat",       m_tkStat);
+      m_ntupleEvt->addItem("match",      m_match);
+      m_ntupleEvt->addItem("nHit",       m_nHit, 0 ,5000);
+      m_ntupleEvt->addIndexedItem ("layer",    m_nHit, m_layer);
+      m_ntupleEvt->addIndexedItem ("wire",     m_nHit, m_wire);
+      m_ntupleEvt->addIndexedItem ("doca",     m_nHit, m_doca);
+      m_ntupleEvt->addIndexedItem ("fltLen",   m_nHit, m_fltLen);
+      m_ntupleEvt->addIndexedItem ("resid",    m_nHit, m_resid);
+      m_ntupleEvt->addIndexedItem ("flaglr",   m_nHit, m_flaglr);
+      m_ntupleEvt->addIndexedItem ("driftD",   m_nHit, m_driftD);
+      m_ntupleEvt->addIndexedItem ("driftDMc", m_nHit, m_driftDMc);
+      m_ntupleEvt->addIndexedItem ("driftT",   m_nHit, m_driftT);
+      m_ntupleEvt->addIndexedItem ("sigma",    m_nHit, m_sigma);
+      m_ntupleEvt->addIndexedItem ("eAngle",   m_nHit, m_entra);
+      m_ntupleEvt->addIndexedItem ("zhit",     m_nHit, m_zhit);
+      m_ntupleEvt->addIndexedItem ("ambig",    m_nHit, m_ambig);
+      m_ntupleEvt->addIndexedItem ("chi2add",  m_nHit, m_chi2add);
+      m_ntupleEvt->addIndexedItem ("hitStat",  m_nHit, m_hitStat);
+      m_ntupleEvt->addIndexedItem ("Tdc",      m_nHit, m_Tdc);
+      m_ntupleEvt->addIndexedItem ("Adc",      m_nHit, m_Adc);
+      //std::cout<<__FILE__<<" "<<__LINE__<<"   "<<std::endl;
+
+      m_ntupleEvt->addItem("particleType", m_particleType, 0, 5);
+      m_ntupleEvt->addIndexedItem("filterStat", m_particleType, m_filterStat_kal);
+      m_ntupleEvt->addIndexedItem("smoothStat", m_particleType, m_smoothStat_kal);
+      m_ntupleEvt->addIndexedItem("charge_kal", m_particleType, m_charge_kal);
+      m_ntupleEvt->addIndexedItem("dr_kal",     m_particleType, m_dr_kal);
+      m_ntupleEvt->addIndexedItem("phi0_kal",   m_particleType, m_phi0_kal);
+      m_ntupleEvt->addIndexedItem("kap_kal",    m_particleType, m_kap_kal);
+      m_ntupleEvt->addIndexedItem("dz_kal",     m_particleType, m_dz_kal);
+      m_ntupleEvt->addIndexedItem("tanl_kal",   m_particleType, m_tanl_kal);
+      m_ntupleEvt->addIndexedItem("p_kal",      m_particleType, m_p_kal);
+      m_ntupleEvt->addIndexedItem("pt_kal",     m_particleType, m_pt_kal);
+      m_ntupleEvt->addIndexedItem("px_kal",     m_particleType, m_px_kal);
+      m_ntupleEvt->addIndexedItem("py_kal",     m_particleType, m_py_kal);
+      m_ntupleEvt->addIndexedItem("pz_kal",     m_particleType, m_pz_kal);
+      m_ntupleEvt->addIndexedItem("theta_kal",  m_particleType, m_theta_kal);
+      m_ntupleEvt->addIndexedItem("phi_kal",    m_particleType, m_phi_kal);
+      m_ntupleEvt->addIndexedItem("vr_kal",     m_particleType, m_vr_kal);
+      m_ntupleEvt->addIndexedItem("vz_kal",     m_particleType, m_vz_kal);
+      m_ntupleEvt->addIndexedItem("match_kal",  m_particleType, m_match_kal);
+    } else {   
+      log << MSG::ERROR << "Cannot book tuple MdcValidSingle/evt" << endmsg;
+      return StatusCode::FAILURE;
+    }
+  }
+
+  return StatusCode::SUCCESS;
+}
+
+// * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * 
+StatusCode MdcValidSingle::execute() {
+
+  MsgStream log(msgSvc(), name());
+  log << MSG::INFO << "in execute()" << endreq;
+  if(0 == (m_totevt % 10000)) cout << name()<< " execute event " << m_totevt << endl;
+  m_totevt++;
+
+  SmartDataPtr<Event::EventHeader> eventHeader(eventSvc(),"/Event/EventHeader");
+  if (!eventHeader) {
+    log << MSG::FATAL << "Could not find EventHeader" << endreq;
+    return StatusCode::FAILURE;
+  }
+  t_run = eventHeader->runNumber();
+  t_evt = eventHeader->eventNumber();
+  m_run = t_run;
+  m_evt = t_evt;
+
+  std::cout<<" run "<<t_run<<" evt "<<t_evt<<"   "<<std::endl;
+  int nMatchMdc = -999;
+  int nMatchKal = -999;
+
+  //-- rec track
+  if(!(m_checkRecTrack||m_checkKalTrack)){
+    SmartDataPtr<EvtRecEvent> evtRecEvent(eventSvc(), EventModel::EvtRec::EvtRecEvent);
+    if (!evtRecEvent) {
+      log << MSG::FATAL << "Could not find EvtRecEvent" << endreq;
+      return StatusCode::FAILURE;
+    }
+    SmartDataPtr<EvtRecTrackCol> evtRecTrkCol(eventSvc(),  EventModel::EvtRec::EvtRecTrackCol);
+    if (!evtRecTrkCol) {
+      log << MSG::FATAL << "Could not find EvtRecTrackCol" << endreq;
+      return StatusCode::FAILURE;
+    }
+
+    m_nTrk = evtRecEvent->totalCharged();
+    //int tkIdMatched = matchRecTrack(nMatchMdc,nMatchKal);
+    //if( tkIdMatched!=-999 ){ 
+    //  for(int i = 0; i < evtRecEvent->totalCharged(); i++) {
+    //    EvtRecTrackIterator itTrk=evtRecTrkCol->begin() + i;
+    //    RecMdcTrack *mdctrk = (*itTrk)->mdcTrack();
+    //    if(mdctrk->trackId() != tkIdMatched) continue;
+    //    RecMdcKalTrack *mdcKalTrk = (*itTrk)->mdcKalTrack();
+    //    fillRecMdcTrack(mdctrk, mdcKalTrk); 
+    //  }
+    //}
+  }else{
+    SmartDataPtr<RecMdcTrackCol> recMdcTrackCol(eventSvc(), "/Event/Recon/RecMdcTrackCol");
+    if(!recMdcTrackCol){
+      log << MSG::FATAL<< "Could not get RecMdcTrackCol" << endreq;
+      return StatusCode::FAILURE;
+    }
+    if(m_checkRecTrack) m_nTrk = recMdcTrackCol->size();
+    else {
+      SmartDataPtr<RecMdcKalTrackCol> recMdcKalTrackCol(eventSvc(),"/Event/Recon/RecMdcKalTrackCol");
+      m_nTrk = recMdcKalTrackCol->size();
+    }
+    //RecMdcTrack* mdcTrk = NULL;
+    //RecMdcKalTrack* mdcKalTrk = NULL;
+
+    //int tkIdMatched = matchRecTrack(nMatchMdc,nMatchKal);
+    //if( tkIdMatched!=-999 ){
+    //  //-- mdc track
+    //  RecMdcTrackCol::iterator it = recMdcTrackCol->begin();
+    //  for (;it!= recMdcTrackCol->end();it++){
+    //    if(tkIdMatched==(*it)->trackId()) mdcTrk = (*it);
+    //  }
+    //  //-- kalman track
+    //  SmartDataPtr<RecMdcKalTrackCol> recMdcKalTrackCol(eventSvc(),"/Event/Recon/RecMdcKalTrackCol");
+    //  if(!recMdcKalTrackCol && m_checkKalTrack){
+    //    log << MSG::FATAL<< "Could not retrieve RecMdcKalTrackCol" << endreq;
+    //    return StatusCode::FAILURE;
+    //  }else{
+    //    RecMdcKalTrackCol::iterator itKal = recMdcKalTrackCol->begin();
+    //    for (;itKal!= recMdcKalTrackCol->end();itKal++){
+    //      if(tkIdMatched==(*itKal)->trackId()) mdcKalTrk = (*itKal);
+    //    }
+    //  }
+    //  fillRecMdcTrack(mdcTrk, mdcKalTrk); 
+    //}
+  }
+  int tkIdMatched = matchRecTrack(nMatchMdc,nMatchKal);
+  m_nMatchMdc = nMatchMdc;
+  m_nMatchKal = nMatchKal;
+
+
+
+  m_ntupleEvt->write();
+  return StatusCode::SUCCESS;
+}
+
+// * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * 
+StatusCode MdcValidSingle::finalize() {
+  MsgStream log(msgSvc(), name());
+  log << MSG::INFO << "in finalize()" << endreq;
+  cout <<name() << " total event: " << m_totevt <<" matchSingle "<<m_nMatchSingle<<" notMatch "<<m_nNotMatch <<" matchMulti "<<m_nMatchMulti<< endl;
+
+  return StatusCode::SUCCESS;
+}
+
+
+void MdcValidSingle::getVertex(HepVector a, HepSymMatrix Ea, double& vr, double& vz){
+  Hep3Vector xorigin(0,0,0);
+  double* dbv = m_vtxsvc->PrimaryVertex();
+  double* vv = m_vtxsvc->SigmaPrimaryVertex();
+  xorigin.setX(dbv[0]);
+  xorigin.setY(dbv[1]);
+  xorigin.setZ(dbv[2]);
+
+  //HepPoint3D point0(0.,0.,0.);
+  //VFHelix helixip(point0,a,Ea);
+  //HepPoint3D IP(xorigin[0],xorigin[1],xorigin[2]);
+  //helixip.pivot(IP);
+  //HepVector vecipa = helixip.a();
+  //vr = vecipa[0];
+  //vz = vecipa[3];
+}
+
+//------------------------------------------------------------------
+//given pid of single primary particle
+//fill truth info, match track by param cut
+//count matched mdc and kalman track number
+// if MC track not valid return -999, else return nMatchMdc
+//------------------------------------------------------------------
+int MdcValidSingle::matchRecTrack(int& nMatchMdc, int& nMatchKal){
+  nMatchMdc = -999;
+  nMatchKal = -999;
+  MsgStream log(msgSvc(), name());
+  StatusCode sc;
+
+  t_t0Truth=-1.;
+  SmartDataPtr<McParticleCol> mcParticleCol(eventSvc(),"/Event/MC/McParticleCol");
+  if (!mcParticleCol) {
+    log << MSG::ERROR << "Could not find McParticle" << endreq;
+    return -999;
+  }
+  int itk = 0;
+  int t_qTruth = 0;
+  int t_pidTruth = -999;
+  int t_McTkId = -999;
+  t_nTrkMC=0;
+  Helix* mchelix;
+  //HepVector mchelix(5);
+  Hep3Vector true_mom;
+
+  // fill truth track info
+  McParticleCol::iterator iter_mc = mcParticleCol->begin();
+  for (;iter_mc != mcParticleCol->end(); iter_mc++ ) {
+    if(!(*iter_mc)->primaryParticle()) continue;
+    t_pidTruth = (*iter_mc)->particleProperty();
+
+    if(m_debug>2) cout<< "tk "<<itk<< " pid="<< t_pidTruth<< endl;
+    if((m_pid!=0) && (t_pidTruth != m_pid)){ continue; }
+
+    t_t0Truth=(*iter_mc)->initialPosition().t();
+
+    if(itk>=10) break;
+
+    int pid = t_pidTruth; 
+    if( pid == 0 ) { 
+      log << MSG::WARNING << "Wrong particle id" <<endreq;
+      continue;
+    }else{
+      IPartPropSvc* p_PartPropSvc;
+      static const bool CREATEIFNOTTHERE(true);
+      StatusCode PartPropStatus = service("PartPropSvc", p_PartPropSvc, CREATEIFNOTTHERE);
+      if (!PartPropStatus.isSuccess() || 0 == p_PartPropSvc) {
+	std::cout<< " Could not initialize Particle Properties Service" << std::endl;
+      }
+      HepPDT::ParticleDataTable* p_particleTable = p_PartPropSvc->PDT(); 
+      std::string name;
+      if( p_particleTable->particle(pid) ){
+	name = p_particleTable->particle(pid)->name();
+	t_qTruth = p_particleTable->particle(pid)->charge();
+      }else if( p_particleTable->particle(-pid) ){
+	name = "anti " + p_particleTable->particle(-pid)->name();
+	t_qTruth = (-1)*p_particleTable->particle(-pid)->charge();
+      }
+      if(m_debug>2) std::cout << " particle "<<name<<" charge= "<<t_qTruth<<std::endl;
+    }
+
+    t_McTkId = (*iter_mc)->trackIndex();
+
+    double charge = t_qTruth;
+    true_mom = (*iter_mc)->initialFourMomentum().vect();
+    const CLHEP::HepLorentzVector& posIni = (*iter_mc)->initialPosition()/10.;
+
+    //get truth helix
+    double Bz = m_bfield->bFieldNominal();
+    HepPoint3D position(posIni.x(),posIni.y(),posIni.z());
+    if(m_debug>1)std::cout<<"position "<<position<<" true_mom  "<<(*iter_mc)->initialFourMomentum().v()<<" q "<<t_qTruth<<std::endl;
+    //mchelix = calcHelix(position,true_mom,charge,Bz);
+    mchelix = new Helix((*iter_mc)->initialPosition().v(), (*iter_mc)->initialFourMomentum().v(), t_qTruth);
+    if(m_debug>1)std::cout<<" mchelix before convert pivot "<<mchelix->dr()<<","<<mchelix->phi0()<<","<<mchelix->kappa()<<","<<mchelix->dz()<<","<<mchelix->tanl()<<std::endl;
+    mchelix->pivot( HepPoint3D(0.,0.,0.) );
+    if(m_debug>1)std::cout<<" mchelix after convert pivot "<<mchelix->dr()<<","<<mchelix->phi0()<<","<<mchelix->kappa()<<","<<mchelix->dz()<<","<<mchelix->tanl()<<std::endl;
+
+    if(m_debug>2){
+      std::cout<<"Truth tk "<<itk<<" pid "<<pid<<" charge "<<t_qTruth
+	<< " helix "<< mchelix->a()<<" p "<<true_mom.mag()<<std::endl;
+    }
+
+    t_nTrkMC++;
+    itk++;
+  }//end of loop over mcParticleCol
+
+  if(t_nTrkMC!=1) {
+    std::cout<<"WARNING run "<<t_run<<" evt "<<t_evt<<" not single event. nTrkMc="<<t_nTrkMC<<std::endl;
+    return -999;
+  }else{
+    if(m_debug>2) std::cout<<"nTrkMc=1"<<std::endl;
+  }
+
+  for(int i=0;i<NLAYER;i++)for(int j=0;j<MAXCELL;j++) t_mcDrift[i][j]=-999;
+  double firstHitZ = 9999.;
+  double lastHitZ = 9999.;
+  //------------------Retrieve MC truth MdcMcHit------------
+  SmartDataPtr<Event::MdcMcHitCol> mcMdcMcHitCol(eventSvc(),"/Event/MC/MdcMcHitCol"); 
+  if (!mcMdcMcHitCol) {
+    log << MSG::INFO << "Could not find MdcMcHit" << endreq; 
+  }else{
+    Event::MdcMcHitCol::iterator iter_mchit = mcMdcMcHitCol->begin();
+    int ihit = 0;
+    for (;iter_mchit != mcMdcMcHitCol->end(); iter_mchit++,ihit++ ) {
+      const Identifier id= (*iter_mchit)->identify();
+      int layer = MdcID::layer(id);
+      int wire = MdcID::wire(id);
+      t_mcDrift[layer][wire] = (*iter_mchit)->getDriftDistance()/10.;  //drift in MC.
+      double mcZ = (*iter_mchit)->getPositionZ()/10.;
+      if(ihit == 0 && layer ==0){
+	firstHitZ = mcZ;
+      }
+      
+      if(ihit+1 == mcMdcMcHitCol->size() && layer ==0){
+	lastHitZ = mcZ;
+      }
+    }
+  }//end of loop over MdcMcHitCol
+  m_firstHitZ = firstHitZ;
+  m_lastHitZ = lastHitZ;
+
+  //--fill truth in evt 
+  m_pidTruth   = t_pidTruth;
+  //m_drTruth    = mchelix[0];
+  //m_phi0Truth  = mchelix[1];
+  //m_dzTruth    = mchelix[3];
+  //double tanlTruth = mchelix[4];
+  m_drTruth    = mchelix->dr();
+  m_phi0Truth  = mchelix->phi0();;
+  m_dzTruth    = mchelix->dz();
+  double tanlTruth = mchelix->tanl();
+  m_tanlTruth  = tanlTruth;
+  double costaTruth = tanlTruth / sqrt(1+tanlTruth*tanlTruth);
+  m_costaTruth = costaTruth;
+  m_ptTruth    = true_mom.perp();
+  m_pTruth     = true_mom.mag();
+  m_pzTruth    = true_mom.z();
+  m_qTruth     = t_qTruth;
+
+  
+  //-- event start time
+  SmartDataPtr<RecEsTimeCol> aevtimeCol(eventSvc(),"/Event/Recon/RecEsTimeCol");
+  if (aevtimeCol) {
+    RecEsTimeCol::iterator iter_evt = aevtimeCol->begin();
+    for (;iter_evt!=aevtimeCol->end();iter_evt++){
+      m_t0 = (*iter_evt)->getTest();
+      m_t0Stat = (*iter_evt)->getStat();
+      m_t0Truth = t_t0Truth;
+    }
+  }else{
+    log << MSG::WARNING << "Could not find RecEsTimeCol" << endreq;
+    m_t0 = 0;
+  } 
+
+  int nMcHit=0;
+
+  //mdc digi 
+  int truthmap[NLAYER][MAXCELL];
+  for(int i=0;i<NLAYER;i++) for(int j=0;j<MAXCELL;j++) truthmap[i][j]=-1;
+  SmartDataPtr<MdcDigiCol> mdcDigiCol(eventSvc(),"/Event/Digi/MdcDigiCol");
+  if (!mdcDigiCol) {
+    log << MSG::FATAL << "Could not find event" << endreq;
+    return -999;
+  }else{
+    MdcDigiCol::iterator iter_digi = mdcDigiCol->begin();
+    for(; iter_digi != mdcDigiCol->end(); iter_digi++) {
+      int layer = MdcID::layer((*iter_digi)->identify());
+      int wire = MdcID::wire((*iter_digi)->identify());
+      int tkId = (*iter_digi)->getTrackIndex();
+      if(tkId>=1000) tkId-=1000;
+      truthmap[layer][wire]= tkId;
+    }
+  }
+  bool nLayerMcPassed[NLAYER];
+  int nLayerMc = 0;
+  for (int i=0;i<NLAYER;i++){ nLayerMcPassed[i]=false;}
+  //std::cout<<__FILE__<<" "<<__LINE__<<" McHits  "<<std::endl;
+  for(int i=0;i<NLAYER;i++) for(int j=0;j<MAXCELL;j++) {
+    if(truthmap[i][j]==t_McTkId) {
+      nMcHit++;
+      nLayerMcPassed[i]=true;
+      //std::cout<<"("<<i<<","<<j<<") "<<t_McTkId<<std::endl;
+    }
+  }
+  for (int i=0;i<NLAYER;i++){ 
+    if(nLayerMcPassed[i]) nLayerMc++;
+  }
+  m_nDigi = mdcDigiCol->size();
+  m_nLayerMc = nLayerMc;
+
+  std::vector<RecMdcTrack*> mdcTrackVec;
+  std::vector<RecMdcKalTrack*> mdcKalTrackVec;
+  int nTk=0;
+  if(!(m_checkRecTrack||m_checkKalTrack)){
+    SmartDataPtr<EvtRecEvent> evtRecEvent(eventSvc(), EventModel::EvtRec::EvtRecEvent);
+    if (!evtRecEvent) {
+      log << MSG::FATAL << "Could not find EvtRecEvent" << endreq;
+      return -999; 
+    }
+    SmartDataPtr<EvtRecTrackCol> evtRecTrkCol(eventSvc(),  EventModel::EvtRec::EvtRecTrackCol);
+    if (!evtRecTrkCol) {
+      log << MSG::FATAL << "Could not find EvtRecTrackCol" << endreq;
+      return -999; 
+    }
+
+    nTk = evtRecEvent->totalCharged();
+    for(int i = 0; i < evtRecEvent->totalCharged(); i++){
+      EvtRecTrackIterator itTrk =evtRecTrkCol->begin() + i;
+      if(!(*itTrk)->isMdcTrackValid()) continue;
+      RecMdcTrack* tk = (*itTrk)->mdcTrack();
+      mdcTrackVec.push_back(tk);
+      RecMdcKalTrack *kalTk = (*itTrk)->mdcKalTrack();
+      if(kalTk!=NULL) mdcKalTrackVec.push_back(kalTk);
+    }
+  }else{
+    //-- mdc track
+    SmartDataPtr<RecMdcTrackCol> recMdcTrackCol(eventSvc(), "/Event/Recon/RecMdcTrackCol");
+    if(!recMdcTrackCol && m_checkRecTrack){
+      log << MSG::FATAL<< "Could not get RecMdcTrackCol" << endreq;
+      if(m_checkRecTrack) return -999;
+    }else{
+      nTk = recMdcTrackCol->size();
+      RecMdcTrackCol::iterator it = recMdcTrackCol->begin();
+      for (;it!= recMdcTrackCol->end();it++){
+	mdcTrackVec.push_back(*it);
+      }
+    }
+    //-- kalman track
+    SmartDataPtr<RecMdcKalTrackCol> recMdcKalTrackCol(eventSvc(),"/Event/Recon/RecMdcKalTrackCol");
+    if(!recMdcKalTrackCol && m_checkKalTrack){
+      log << MSG::FATAL<< "Could not retrieve RecMdcKalTrackCol" << endreq;
+      if(m_checkKalTrack) return -999;
+    }else{
+      nTk = recMdcKalTrackCol->size();
+      RecMdcKalTrackCol::iterator itKal = recMdcKalTrackCol->begin();
+      for (;itKal!= recMdcKalTrackCol->end();itKal++){
+	mdcKalTrackVec.push_back(*itKal);
+      }
+    }
+  }
+
+  //-----------------------------------
+  //loop over mdc and kalman tracks, match by track param
+  //count matched track number
+  //-----------------------------------
+  nMatchMdc=0;
+  nMatchKal=0;
+  bool mdcMatched = true;
+  bool kalMatched = true;
+  double dPhi0,dCosTa,dP,dPt,dPz,dDr,dDz = -999.;
+  //m_nTrk = mdcTrackVec.size();
+  RecMdcTrack* tk= NULL;//TEMP yzhang
+  for (int iTk = 0; iTk< mdcTrackVec.size(); iTk++){
+    //-- MDC track
+    //RecMdcTrack* tk = (*itTrk)->mdcTrack();
+    tk = mdcTrackVec[iTk];
+    int tkId = tk->trackId();
+    double dr    = tk->helix(0);
+    double phi0  = tk->helix(1);
+    double cpa   = tk->helix(2);
+    double dz    = tk->helix(3);
+    double tanl  = tk->helix(4);
+    int    q     = tk->charge();
+
+    if(m_debug>2) std::cout<<__FILE__<<" "<<__LINE__<<" MdcTrack helix "<<tk->helix()<<std::endl;
+    //double dPhi0 = fabs(phi0 - mchelix[1] + CLHEP::pi*2.);
+    //while(dPhi0>CLHEP::pi) dPhi0 -= CLHEP::twopi;
+    //double dPhi0 = phi0 - mchelix[1];
+    dPhi0 = phi0 - mchelix->phi0();
+    dCosTa= cos(tk->theta()) - costaTruth;
+    dP  = tk->p() - true_mom.mag();
+    dPt = tk->pxy() - true_mom.perp();
+    dPz = tk->pz() - true_mom.z();
+    dDr = dr - mchelix->dr();
+    dDz = dz - mchelix->dz();
+
+    //std::cout<<__FILE__<<" "<<__LINE__<<" ptMdc  "<<tk->pxy()<<" mc pt "<<mchelix->pt()<<std::endl;
+    //std::cout<<__FILE__<<" "<<__LINE__<<" pMdc  "<<tk->p()<<" mc p "<<mchelix->momentum(0).mag()<<std::endl;
+    m_runDiff = t_run;
+    m_evtDiff = t_evt;
+    m_tkId = tkId;
+    m_nTk  = nTk;
+
+    m_dPhi0 = dPhi0;
+    m_dCosTa= dCosTa;
+    m_dPt = dPt;
+    m_dPz = dPz;
+    m_dP = dP;
+    m_dDr = dDr;
+    m_dDz = dDz;
+
+
+    //std::cout<<__FILE__<<" "<<__LINE__<<" recHits  "<<std::endl;
+    int nMatchHit = 0;
+    HitRefVec hitList = tk->getVecHits();
+    HitRefVec::iterator hitIt = hitList.begin();
+    for(;hitIt!=hitList.end();hitIt++){
+      RecMdcHit *h = *hitIt;
+      if(!h) continue;
+      Identifier id = h->getMdcId();
+      int layer = MdcID::layer(id);
+      int wire = MdcID::wire(id);
+      //std::cout<<"("<<layer<<","<<wire<<") t_McTkId  "<<t_McTkId<<" truthmap "<<truthmap[layer][wire]<<std::endl;
+      if(truthmap[layer][wire]==t_McTkId) nMatchHit++;
+    }
+
+    if(nMatchHit< m_cutHitRate * hitList.size()) {
+      if(m_debug>1) std::cout<<t_run<<" "<<t_evt<<" cut by nMatchHit! nMatchHit="<<nMatchHit<<" nHit "<<hitList.size()<<" rate= "<<(float) nMatchHit/((float) hitList.size())<<" cut "<<m_cutHitRate<<" nMcHit "<<nMcHit<<std::endl;
+      mdcMatched = false;
+    }
+    //--cut mdc
+    if(m_cutCharge && t_qTruth != q) {
+      if(m_debug>1) std::cout<<t_run<<" "<<t_evt<<" cut by charge! q_rec "<<q<<" q_mc "<<t_qTruth <<std::endl;
+      mdcMatched = false;
+    }
+    if(m_cutPhi0>-999. && fabs(dPhi0)>m_cutPhi0){
+      if(m_debug>1) std::cout<<t_run<<" "<<t_evt<<" cut by phi0! dPhi0 "<<dPhi0<<" cutPhi0  "<<m_cutPhi0<<std::endl;
+      mdcMatched = false;
+    }
+    if(m_cutCosTa> -999. && fabs(dCosTa)>m_cutCosTa){
+      if(m_debug>1) std::cout<<t_run<<" "<<t_evt<<" cut by cos theta! dCosTa "<<dCosTa<<" cutCosTa "<<m_cutCosTa<<std::endl;
+      mdcMatched = false;
+    }
+    if(m_cutPt > -999. && fabs(dPt)>m_cutPt){
+      if(m_debug>1) std::cout<<t_run<<" "<<t_evt<<" cut by pt! dPt "<<dPt<<" cutPt "<<m_cutPt<<std::endl;
+      mdcMatched = false;
+    }
+    if(m_cutDr > -999. && fabs(dDr)>m_cutDr){
+      if(m_debug>1) std::cout<<t_run<<" "<<t_evt<<" cut by dr! dDr "<<dDr<<" cutDr "<<m_cutDr<<std::endl;
+      mdcMatched = false;
+    }
+    if(m_cutDz > -999. && fabs(dDz)>m_cutDz){
+      if(m_debug>1) std::cout<<t_run<<" "<<t_evt<<" cut by dz! dDz "<<dDz<<" cutDz "<<m_cutDz<<std::endl;
+      mdcMatched = false;
+    }
+  }//end of loop mdcTrackVec
+
+  RecMdcKalTrack* kalTk = NULL;//TEMP yzhang
+  //-- kalman track
+  double dPhi0Kal,dCosTaKal,dPKal,dPtKal,dPzKal,dDrKal,dDzKal = -999;
+  int qKal=0;
+  //RecMdcKalTrack *kalTk;
+  //std::cout<<__FILE__<<" "<<__LINE__<<" kal track size "<<mdcKalTrackVec.size()<<std::endl;
+  if(mdcKalTrackVec.size()>0){
+    kalTk = mdcKalTrackVec[0];//TEMP FIXME
+    //std::cout<<__FILE__<<" "<<__LINE__<<" kalTk  "<<kalTk<<std::endl;
+    if(NULL != kalTk){
+      //enum PidType { null = -1, electron = 0, muon = 1, pion = 2, kaon = 3, proton = 4 };
+      int ipid = 0;
+      if(fabs(m_pid) == 13) ipid = 1; 
+      DstMdcKalTrack::PidType pidType = DstMdcKalTrack::PidType(ipid);
+      kalTk->setPidType(pidType);
+
+
+      //std::cout<<__FILE__<<" "<<__LINE__<<" ptKal  "<<kalTk->pxy()<<" mc pt "<<mchelix->pt()<<std::endl;
+      //dPhi0Kal = kalTk->fi0() - mchelix[1];
+      dPhi0Kal = kalTk->fi0() - mchelix->phi0();
+      //dPhi0Kal = fabs(kalTk->fi0() - mchelix[1] + CLHEP::pi*2.);
+      //while(dPhi0Kal>CLHEP::pi) dPhi0Kal -= CLHEP::twopi;
+      dCosTaKal= cos(kalTk->theta()) - costaTruth;
+      dPKal = kalTk->p() - true_mom.mag();
+      dPtKal = kalTk->pxy() - true_mom.perp();
+      dPzKal = kalTk->pz() - true_mom.z();
+      //dDrKal = kalTk->dr() - mchelix[0];
+      //dDzKal = kalTk->dz() - mchelix[3];
+      dDrKal = kalTk->dr() - mchelix->dr();
+      dDzKal = kalTk->dz() - mchelix->dz();
+
+      qKal = kalTk->charge();
+      m_dPhi0Kal = dPhi0Kal;
+      m_dCosTaKal= dCosTaKal;
+      m_dPtKal = dPtKal;
+      m_dPzKal = dPzKal;
+      m_dPKal = dPKal;
+      m_dDrKal = dDrKal;
+      m_dDzKal = dDzKal;
+    }
+  }
+
+  m_ntupleDiffMc->write();
+
+
+  if(mdcKalTrackVec.size()<=0) {kalMatched=false;}
+  //if(mdcKalTrackVec.size()>0){
+  //  //-- cut kalman
+  //  if(t_qTruth != qKal) {
+  //    if(m_debug>1) std::cout<<t_run<<" "<<t_evt<<" cut by charge kalman! q_rec "<<qKal<<" q_mc"<<t_qTruth<<std::endl;
+  //    kalMatched = false;
+  //  }
+  //  if(m_cutPhi0>-999. && fabs(dPhi0Kal)>m_cutPhi0){
+  //    if(m_debug>1) std::cout<<t_run<<" "<<t_evt<<" cut by phi0 kalman! dPhi "<<dPhi0Kal<<" cutPhi0  "<<m_cutPhi0<<std::endl;
+  //    kalMatched = false;
+  //  }
+  //  if(m_cutCosTa> -999. && fabs(dCosTaKal)>m_cutCosTa){
+  //    if(m_debug>1) std::cout<<t_run<<" "<<t_evt<<" cut by cos theta kalman! dCosTa "<<dCosTaKal<<" cutCosTa "<<m_cutCosTa<<std::endl;
+  //    kalMatched = false;
+  //  }
+  //  if(m_cutPt > -999. && fabs(dPtKal)>m_cutPt){
+  //    if(m_debug>1) std::cout<<t_run<<" "<<t_evt<<" cut by pt kalman! dPt "<<dPtKal<<" cutPt "<<m_cutPt<<std::endl;
+  //    kalMatched = false;
+  //  }
+  //  if(m_cutDr > -999. && fabs(dDrKal)>m_cutDr){
+  //    if(m_debug>1) std::cout<<t_run<<" "<<t_evt<<" cut by dr kalman! dDr "<<dDrKal<<" cutDr "<<m_cutDr<<std::endl;
+  //    kalMatched = false;
+  //  }
+  //  if(m_cutDz > -999. && fabs(dDzKal)>m_cutDz){
+  //    if(m_debug>1) std::cout<<t_run<<" "<<t_evt<<" cut by dz kalman! dDz "<<dDzKal<<" cutDz "<<m_cutDz<<std::endl;
+  //    kalMatched = false;
+  //  }
+  //}
+  if(mdcMatched) {
+    nMatchMdc++;
+    //matchedTkId = tkId;
+  }
+  if(kalMatched) {
+    nMatchKal++;
+  }
+
+  if(m_checkRecTrack) fillRecMdcTrack(tk, mdcMatched);
+  if(m_checkKalTrack){ fillRecKalTrack(kalTk, kalMatched); }
+
+  if(m_debug>2) std::cout<<"nMatchMdc="<<nMatchMdc<<" nMatchKal="<<nMatchKal<<"   "<<std::endl;
+
+  //if(NULL != mchelix) delete mchelix;
+
+  if(nMatchMdc==1) m_nMatchSingle++;
+  if(nMatchMdc==0) m_nNotMatch++;
+  if(nMatchMdc>1) m_nMatchMulti++;
+  if(nMatchMdc!=1 && m_debug>0) {
+    std::cout<<" run "<<t_run<<" evt "<<t_evt<<" nMatchMdc="<<nMatchMdc<<std::endl;
+    return -999;
+  }
+  if(m_checkKalTrack && nMatchKal!=1 && m_debug>0) {
+    std::cout<<" run "<<t_run<<" evt "<<t_evt<<" nMatchKal="<<nMatchKal<<std::endl;
+  }
+
+  return nMatchMdc;
+}
+
+void MdcValidSingle::fillRecMdcTrack(RecMdcTrack* tk, bool mdcMatched){
+  m_charge = tk->charge();
+  m_trkId  = tk->trackId();
+  m_dr     = tk->helix(0);
+  m_phi0   = tk->helix(1);
+  m_kap    = tk->helix(2);
+  m_dz     = tk->helix(3);
+  m_tanl   = tk->helix(4);
+  //std::cout<<__FILE__<<" "<<__LINE__<<" helix  "<<tk->helix()<<std::endl;
+
+  m_chi2   = tk->chi2();
+  m_ndof   = tk->ndof();
+  m_p      = tk->p();
+  m_pt     = tk->pxy();
+  m_px     = tk->px();
+  m_py     = tk->py();
+  m_pz     = tk->pz();
+  m_cosTheta  = cos(tk->theta());
+  m_phi    = tk->phi();
+  double Bz = m_bfield->bFieldNominal();
+  m_r      = -333.567/(Bz*(tk->helix(2)));
+  //std::cout<<__FILE__<<" "<<__LINE__<<"   "<<m_r<<std::endl;
+  double vr,vz;
+  getVertex(tk->helix(),tk->err(),vr,vz);
+  m_vr     = vr;
+  m_vz     = vz;
+  m_tkStat = tk->stat();
+  m_match  = mdcMatched;
+
+  m_nHit   = tk->getNhits();
+  int ihit=0;
+  HitRefVec hl = tk->getVecHits();
+  HitRefVec::iterator hitIt = hl.begin();
+  for (;hitIt!=hl.end();++hitIt){
+    RecMdcHit* h = *hitIt;
+    if ( !h ) continue;
+    Identifier id = h->getMdcId();
+    int layer = MdcID::layer(id);
+    int wire = MdcID::wire(id);
+    m_layer[ihit] = layer;
+    m_wire[ihit] = wire;
+
+    //fill residual
+    double lr = h->getFlagLR();
+    double driftd = -999;
+    double doca = -999;
+    doca = h->getDoca();
+    if( 0 == lr ){ driftd = h->getDriftDistLeft();
+    }else{ driftd = h->getDriftDistRight();}
+    m_resid[ihit] = fabs(driftd) - fabs(doca);
+    if( 0 == lr ){   m_resid[ihit] *= -1.0;}
+    m_doca[ihit] = doca;
+    m_fltLen[ihit] = h->getFltLen();
+    m_flaglr[ihit] = lr;
+    m_driftD[ihit] = driftd;
+    m_driftDMc[ihit] = t_mcDrift[layer][wire];
+
+    m_driftT[ihit] = h->getDriftT();
+    m_sigma[ihit] = h->getErrDriftDistLeft();
+    m_entra[ihit] = h->getEntra()*180./3.14;
+    m_zhit[ihit] = h->getZhit();
+    m_ambig[ihit] = lr;
+    m_chi2add[ihit] = h->getChisqAdd();
+    m_hitStat[ihit] = h->getStat();
+    m_Tdc[ihit] = h->getTdc();
+    m_Adc[ihit] = h->getAdc();
+    ++ihit;
+  }
+
+}
+
+void MdcValidSingle::fillRecKalTrack(RecMdcKalTrack* kalTk, bool kalMatched){
+
+  if(NULL == kalTk) return;
+  m_particleType = 5;
+  for (int i=0; i<5; i++) {
+    //enum PidType { null = -1, electron = 0, muon = 1, pion = 2, kaon = 3, proton = 4 };
+    DstMdcKalTrack::PidType pidType = DstMdcKalTrack::PidType(i);
+    kalTk->setPidType(pidType);
+    m_filterStat_kal[i] = kalTk->getStat(0,0);
+    m_smoothStat_kal[i] = kalTk->getStat(1,0);
+    m_charge_kal[i]     = kalTk->charge();
+    m_dr_kal[i]         = kalTk->dr();
+    m_phi0_kal[i]       = kalTk->fi0();
+    m_kap_kal[i]        = kalTk->kappa();
+    m_dz_kal[i]         = kalTk->dz();
+    m_tanl_kal[i]       = kalTk->tanl();
+    m_p_kal[i]          = kalTk->p();
+    //std::cout<<__FILE__<<" "<<__LINE__<<"   "<<std::endl;
+    m_pt_kal[i]         = kalTk->pxy();
+    m_px_kal[i]         = kalTk->px();
+    m_py_kal[i]         = kalTk->py();
+    m_pz_kal[i]         = kalTk->pz();
+    m_theta_kal[i]      = kalTk->theta();
+    m_phi_kal[i]        = kalTk->phi();
+    double vrKal,vzKal;
+    getVertex(kalTk->helix(),kalTk->err(),vrKal,vzKal);
+    m_vr_kal[i]         = vrKal;
+    m_vz_kal[i]         = vzKal;
+    m_match_kal[i]      = kalMatched;
+  }
+}
+
+HepVector MdcValidSingle::calcHelix(HepPoint3D position, Hep3Vector momentum, int q , double Bz){
+
+  double px = momentum[0];
+  double py = momentum[1];
+  double pz = momentum[2];
+  double pt = sqrt(px*px+py*py);
+  double x = position[0];
+  double y = position[1];
+  double z = position[2];
+
+  //PatPar
+  double omega = -1.* q * Bz / (333.567*pt);
+  double tanl = pz/pt;
+  double r = -9999.;
+  if (fabs(omega)>0.0001) r = 1./omega;
+
+  //helix center
+  double xc = x + q*py*r/pt;
+  double yc = y - q*px*r/pt;
+  //distance from center of circle to origin
+  double r0 = sqrt(xc*xc + yc*yc);
+  //DCAO d0
+  double d0 = r0 - r;
+  //DCAO z0
+  double cosA = (q*x*py - q*y*px - r*pt)/(r0*pt);
+  double sinA = -1.*(x*px + y*py) / (r0*pt);
+  double A = atan2(sinA,cosA);
+  double xb = (r0-r)*xc/r0;
+  double yb = (r0-r)*yc/r0;
+  double zb = z + A*pz/pt*r;
+  double z0 = zb;
+
+  //momentum at DCAO
+  double px0 = q*(pt/r)*(yb-yc);
+  double py0 = -1.*q*(pt/r)*(xb-xc);
+  //double pz0 = pz;
+
+  //std::cout<<"mom at DCAO "<<px0<<" "<<py0<<" "<<pz0<<std::endl;
+  double phi0 = atan2(py0,px0);
+
+  //std::cout<<"helix "<<d0<<" "<<phi0<<" "<<omega<<" "<<z0<<" "<<tanl<<std::endl;
+  //PAT par
+  HepVector helix(5);
+  helix[0] = d0;
+  helix[1] = phi0;
+  helix[2] = omega;
+  helix[3] = z0;
+  helix[4] = tanl;
+  //to BESIII par
+  helix[0] = -d0;
+  double tphi0 = phi0 - Constants::pi/2.;
+  if (tphi0 < 0. ) tphi0 += Constants::pi * 2.;
+  helix[1] = tphi0;
+  helix[2] = q/sqrt(px0*px0+py0*py0);
+
+  return helix;
+}

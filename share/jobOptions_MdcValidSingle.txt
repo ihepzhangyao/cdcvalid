@@ -1,0 +1,17 @@
+ApplicationMgr.TopAlg += {"MdcValidSingle"};
+ApplicationMgr.DLLs += {"MdcValidSingle"};
+
+//ApplicationMgr.DLLs += {"MdcGeomSvc"};
+//ApplicationMgr.ExtSvc += {"MdcGeomSvc"};
+ApplicationMgr.DLLs += { "MdcPrintSvc" };
+
+//MdcValidSingle.cutPhi = -1;
+//MdcValidSingle.cutTheta = -1;
+//MdcValidSingle.cutPt = -1;
+//MdcValidSingle.cutVr = -1;
+//MdcValidSingle.cutVz = -1;
+//MdcValidSingle.cutRate = 0.5;
+//MdcValidSingle.cutHitRate = 0.8;
+
+//ApplicationMgr.HistogramPersistency = "ROOT";
+//NTupleSvc.Output = {"FILE135 DATAFILE='ntuple.root' OPT='NEW' TYP='ROOT'"};
